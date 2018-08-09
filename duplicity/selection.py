@@ -280,6 +280,79 @@ class Select:
             self.parse_catch_error(e)
         assert filelists_index == len(filelists)
         self.parse_last_excludes()
+        self.optimize_excludes()
+
+
+    def optimize_excludes(self):
+
+        def make_fast_exclude_fn(paths):
+            EOP = None
+
+            def make_path_tree(paths):
+                tree = {}
+                for path in paths:
+                    dir_only = path != '/' and path[-1] == '/'
+
+                    t = tree
+                    for d in path.split('/'):
+                        if d == '':
+                            continue
+
+                        try:
+                            t = t[d]
+                        except KeyError:
+                            tt = {}
+                            t[d] = tt
+                            t = tt
+
+                    t[EOP] = dir_only
+                return tree
+
+            def is_prefixed_by(target, t):
+                is_dir = target.isdir()
+                for d in target.index:
+                    try:
+                        t = t[d]
+                    except KeyError:
+                        # Exclude if we've exactly matched a prefix
+                        return 0 if EOP in t else None
+
+                # Exclude if this was an exact match, and:
+                # - the target is a directory
+                # - the target is a file, and the match pattern is not 'dir_only'
+                return 0 if EOP in t and (not t[EOP] or is_dir) else None
+
+            sel_func = lambda path, tree=make_path_tree(paths): is_prefixed_by(path, tree)
+            sel_func.exclude = True
+            sel_func.name = "Optimized tuple select (%s paths)" % (len(paths),)
+
+            return sel_func
+    
+        # optimize simple includes
+        i0 = 0
+        while i0 != len(self.selection_functions):
+            numsf = len(self.selection_functions)
+            while i0 != numsf and not hasattr(self.selection_functions[i0], 'tuple'):
+                i0 += 1
+            if i0 == numsf:
+                break
+
+            i1 = i0
+            while i1 != numsf and hasattr(self.selection_functions[i1], 'tuple'):
+                sel_func = self.selection_functions[i1]
+                #log.Notice(_("+++++++++ HERE: %s %s %s" % (sel_func.name, sel_func.tuple, sel_func.match_only_dirs)))
+                i1 += 1
+
+            paths = [ '/'.join(sel_fun.tuple) + ('/' if sel_fun.match_only_dirs else '') for sel_fun in self.selection_functions[i0:i1] ]
+            sel_func = make_fast_exclude_fn(paths)
+            self.selection_functions[i0:i1] = [ sel_func ]
+            sel_func = self.selection_functions[i0]
+
+            # replace exclusions in [i0, i1) range with an optimized exclusion
+#            log.Notice(_("+++++++++ Replaced [%s, %s) = %s" % (i0, i1, paths)))
+            log.Notice(_("+++++++++ Replaced [%s, %s) = %s paths" % (i0, i1, len(paths))))
+            log.Notice(_("+++++++++ HERE: %s" % (sel_func.name)))
+            i0 += 1
 
     def parse_catch_error(self, exc):
         """Deal with selection error exc"""
@@ -521,6 +594,7 @@ probably isn't what you meant.""") %
                 return None
 
         def exclude_sel_func(path):
+
             if match_only_dirs and not path.isdir():
                 # If the glob ended with a /, only match directories
                 return None
@@ -535,6 +609,8 @@ probably isn't what you meant.""") %
             sel_func = exclude_sel_func
         sel_func.exclude = not include
         sel_func.name = "Tuple select %s" % (tuple,)
+        sel_func.match_only_dirs = match_only_dirs
+        sel_func.tuple = tuple
         return sel_func
 
     def glob_get_normal_sf(self, glob_str, include):
